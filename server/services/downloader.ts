@@ -256,25 +256,42 @@ export class MediaDownloader {
 
   private async downloadInstagram(url: string, quality: string): Promise<DownloadResponse> {
     try {
+      // Multiple extraction methods for Instagram
+      let extractedData = await this.extractInstagramMultipleMethods(url);
+      
+      if (!extractedData.hasMedia) {
+        return {
+          success: false,
+          platform: Platform.INSTAGRAM,
+          error: {
+            code: ErrorCode.EXTRACTION_FAILED,
+            message: "Could not extract Instagram media URLs",
+            details: "Instagram media extraction failed with all available methods"
+          }
+        };
+      }
+
       return {
         success: true,
         platform: Platform.INSTAGRAM,
         data: {
-          title: "Instagram Post",
-          author: "username",
-          thumbnail: "https://example.com/thumbnail.jpg",
+          title: extractedData.title || "Instagram Post",
+          author: extractedData.author || "Unknown",
+          thumbnail: extractedData.thumbnail,
           downloads: {
-            images: ["https://example.com/image1.jpg", "https://example.com/image2.jpg"],
-            video: {
-              hd: "https://example.com/video-hd.mp4"
-            }
+            images: extractedData.images || [],
+            video: extractedData.videoUrl ? {
+              hd: extractedData.videoUrl,
+              sd: extractedData.videoUrl
+            } : undefined
           },
           metadata: {
-            title: "Instagram Post",
-            author: "username",
-            views: 500000,
-            likes: 25000,
-            uploadDate: new Date().toISOString()
+            title: extractedData.title || "Instagram Post",
+            author: extractedData.author || "Unknown",
+            views: extractedData.views || 0,
+            likes: extractedData.likes || 0,
+            uploadDate: extractedData.uploadDate || new Date().toISOString(),
+            description: extractedData.description
           }
         }
       };
@@ -289,6 +306,102 @@ export class MediaDownloader {
         }
       };
     }
+  }
+
+  private async extractInstagramMultipleMethods(url: string) {
+    // Method 1: Try oEmbed API (works for public posts)
+    try {
+      const oEmbedUrl = `https://graph.facebook.com/v16.0/instagram_oembed?url=${encodeURIComponent(url)}&access_token=dummy`;
+      const oEmbedResponse = await axios.get(oEmbedUrl, { timeout: 5000 });
+      if (oEmbedResponse.data && oEmbedResponse.data.thumbnail_url) {
+        return {
+          title: oEmbedResponse.data.title || "Instagram Post",
+          author: oEmbedResponse.data.author_name,
+          thumbnail: oEmbedResponse.data.thumbnail_url,
+          images: [oEmbedResponse.data.thumbnail_url], // Basic fallback
+          hasMedia: true,
+          description: oEmbedResponse.data.title
+        };
+      }
+    } catch (e) {
+      console.log('Instagram oEmbed method failed:', e.message);
+    }
+
+    // Method 2: HTML scraping for public content
+    try {
+      const response = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5'
+        },
+        timeout: 10000
+      });
+
+      const $ = cheerio.load(response.data);
+      
+      // Extract basic info from meta tags
+      const title = $('meta[property="og:title"]').attr('content') || 
+                   $('title').text() || "Instagram Post";
+      const description = $('meta[property="og:description"]').attr('content') || 
+                         $('meta[name="description"]').attr('content');
+      const thumbnail = $('meta[property="og:image"]').attr('content');
+      const videoUrl = $('meta[property="og:video"]').attr('content') || 
+                      $('meta[property="og:video:url"]').attr('content');
+      
+      // Try to extract from JSON data in script tags
+      let images = [];
+      let author = null;
+      let likes = 0;
+      let views = 0;
+      
+      $('script[type="application/ld+json"]').each((i, script) => {
+        try {
+          const jsonData = JSON.parse($(script).html());
+          if (jsonData.author && jsonData.author.name) {
+            author = jsonData.author.name;
+          }
+          if (jsonData.image) {
+            if (Array.isArray(jsonData.image)) {
+              images = jsonData.image;
+            } else {
+              images = [jsonData.image];
+            }
+          }
+        } catch (e) {
+          // Continue searching
+        }
+      });
+
+      // If no images found from JSON, use og:image
+      if (images.length === 0 && thumbnail) {
+        images = [thumbnail];
+      }
+
+      return {
+        title: title,
+        author: author,
+        thumbnail: thumbnail,
+        videoUrl: videoUrl,
+        images: images,
+        likes: likes,
+        views: views,
+        description: description,
+        uploadDate: new Date().toISOString(),
+        hasMedia: (images.length > 0 || videoUrl) ? true : false
+      };
+      
+    } catch (e) {
+      console.log('Instagram HTML scraping method failed:', e.message);
+    }
+
+    // Method 3: Fallback with minimal info
+    return {
+      title: "Instagram Post",
+      author: "Unknown",
+      hasMedia: false,
+      description: "Could not extract media URLs - Instagram may require authentication"
+    };
   }
 
   private async downloadPinterest(url: string, quality: string): Promise<DownloadResponse> {
