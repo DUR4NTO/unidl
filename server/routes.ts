@@ -1,8 +1,9 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import cors from "cors";
-import { downloadRequestSchema, ErrorCode } from "@shared/schema";
+import { downloadRequestSchema, ErrorCode, Platform } from "@shared/schema";
 import { MediaDownloader } from "./services/downloader";
+import { storage } from "./storage";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Enable CORS for all routes
@@ -13,24 +14,75 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   const downloader = new MediaDownloader();
 
+  // Helper function to track analytics and download history
+  const trackAnalytics = async (
+    req: any,
+    res: any,
+    platform: string,
+    url: string,
+    quality: string,
+    result: any,
+    startTime: number
+  ) => {
+    try {
+      const processingTime = Date.now() - startTime;
+      const ipAddress = req.ip || req.connection.remoteAddress || 'unknown';
+      const userAgent = req.get('User-Agent') || 'unknown';
+      
+      // Record download history
+      await storage.recordDownload({
+        url,
+        platform,
+        success: result.success,
+        quality,
+        ipAddress,
+        userAgent,
+        response: JSON.stringify(result),
+        error: result.success ? null : (result.error?.message || 'Unknown error'),
+        processingTime,
+      });
+      
+      // Update analytics
+      await storage.updateAnalytics(platform, result.success, processingTime);
+      
+      // Record request for rate limiting
+      await storage.recordRequest(ipAddress, req.path);
+    } catch (error) {
+      // Don't fail the request if analytics fail
+      console.error('Analytics tracking failed:', error);
+    }
+  };
+
   // Universal download endpoint
   app.get("/api/download", async (req, res) => {
+    const startTime = Date.now();
+    let result: any;
+    let url = '';
+    let quality = 'auto';
+    
     try {
       const validation = downloadRequestSchema.safeParse(req.query);
       
       if (!validation.success) {
-        return res.status(400).json({
+        result = {
           success: false,
           error: {
             code: ErrorCode.INVALID_URL,
             message: "Invalid request parameters",
             details: validation.error.errors.map(e => e.message).join(", ")
           }
-        });
+        };
+        await trackAnalytics(req, res, 'universal', url, quality, result, startTime);
+        return res.status(400).json(result);
       }
 
-      const { url, quality } = validation.data;
-      const result = await downloader.downloadUniversal(url, quality);
+      url = validation.data.url;
+      quality = validation.data.quality;
+      result = await downloader.downloadUniversal(url, quality);
+      
+      // Track analytics
+      const platform = result.platform || downloader.detectPlatform(url) || 'unknown';
+      await trackAnalytics(req, res, platform, url, quality, result, startTime);
       
       const statusCode = result.success ? 200 : 400;
       res.status(statusCode).json(result);

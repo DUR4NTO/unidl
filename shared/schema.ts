@@ -1,4 +1,17 @@
 import { z } from "zod";
+import { 
+  pgTable, 
+  serial, 
+  varchar, 
+  text, 
+  timestamp, 
+  boolean, 
+  integer, 
+  jsonb,
+  index
+} from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { relations } from "drizzle-orm";
 
 // Download request schema
 export const downloadRequestSchema = z.object({
@@ -74,3 +87,83 @@ export const ErrorCode = {
 } as const;
 
 export type ErrorCodeType = typeof ErrorCode[keyof typeof ErrorCode];
+
+// Database Models
+export const downloads = pgTable("downloads", {
+  id: serial("id").primaryKey(),
+  url: text("url").notNull(),
+  platform: varchar("platform", { length: 50 }).notNull(),
+  success: boolean("success").notNull(),
+  quality: varchar("quality", { length: 10 }),
+  ipAddress: varchar("ip_address", { length: 45 }),
+  userAgent: text("user_agent"),
+  response: jsonb("response"), // Store the full response for analytics
+  error: text("error"), // Store error message if failed
+  processingTime: integer("processing_time"), // Processing time in milliseconds
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  platformIdx: index("platform_idx").on(table.platform),
+  createdAtIdx: index("created_at_idx").on(table.createdAt),
+  ipAddressIdx: index("ip_address_idx").on(table.ipAddress),
+}));
+
+export const analytics = pgTable("analytics", {
+  id: serial("id").primaryKey(),
+  platform: varchar("platform", { length: 50 }).notNull(),
+  totalRequests: integer("total_requests").default(0).notNull(),
+  successfulRequests: integer("successful_requests").default(0).notNull(),
+  failedRequests: integer("failed_requests").default(0).notNull(),
+  averageProcessingTime: integer("avg_processing_time").default(0), // in milliseconds
+  date: timestamp("date").defaultNow().notNull(), // Daily aggregations
+}, (table) => ({
+  platformDateIdx: index("platform_date_idx").on(table.platform, table.date),
+}));
+
+export const rateLimits = pgTable("rate_limits", {
+  id: serial("id").primaryKey(),
+  ipAddress: varchar("ip_address", { length: 45 }).notNull(),
+  endpoint: varchar("endpoint", { length: 100 }).notNull(),
+  requestCount: integer("request_count").default(0).notNull(),
+  windowStart: timestamp("window_start").defaultNow().notNull(),
+  lastRequest: timestamp("last_request").defaultNow().notNull(),
+}, (table) => ({
+  ipEndpointIdx: index("ip_endpoint_idx").on(table.ipAddress, table.endpoint),
+  windowStartIdx: index("window_start_idx").on(table.windowStart),
+}));
+
+// Relations
+export const downloadsRelations = relations(downloads, ({ one }) => ({
+  analytics: one(analytics, {
+    fields: [downloads.platform],
+    references: [analytics.platform],
+  }),
+}));
+
+export const analyticsRelations = relations(analytics, ({ many }) => ({
+  downloads: many(downloads),
+}));
+
+// Insert schemas
+export const insertDownloadSchema = createInsertSchema(downloads).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertAnalyticsSchema = createInsertSchema(analytics).omit({
+  id: true,
+  date: true,
+});
+
+export const insertRateLimitSchema = createInsertSchema(rateLimits).omit({
+  id: true,
+  windowStart: true,
+  lastRequest: true,
+});
+
+// Types
+export type Download = typeof downloads.$inferSelect;
+export type InsertDownload = z.infer<typeof insertDownloadSchema>;
+export type Analytics = typeof analytics.$inferSelect;
+export type InsertAnalytics = z.infer<typeof insertAnalyticsSchema>;
+export type RateLimit = typeof rateLimits.$inferSelect;
+export type InsertRateLimit = z.infer<typeof insertRateLimitSchema>;
